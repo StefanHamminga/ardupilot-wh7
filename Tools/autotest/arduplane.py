@@ -3383,6 +3383,63 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
             raise NotAchievedException("Expected terrain height=%f got=%f" %
                                        (expected_terrain_height, report.terrain_height))
 
+    def ScriptingTerrainCorrected(self):
+        '''check terrain:height_amsl() applies the arming reference offset when asked to'''
+        # start well above the SRTM height so arming creates a large reference offset
+        start = SITL_START_LOCATION
+        self.customise_SITL_commandline(["--home", "%.7f,%.7f,%.2f,%.1f" % (
+            start.lat,
+            start.lng,
+            start.get_alt_m(AltFrame.ABSOLUTE) + 20,
+            SITL_START_HEADING)])
+        self.install_terrain_handlers_context()
+        self.install_script_content_context("terrain-corrected.lua", """
+local loc = Location()
+loc:lat(%d)
+loc:lng(%d)
+
+function update()
+  local raw = terrain:height_amsl(loc, false)
+  local corrected = terrain:height_amsl(loc, true)
+  if raw and corrected then
+    gcs:send_named_float("TER_RAW", raw)
+    gcs:send_named_float("TER_COR", corrected)
+  end
+  return update, 500
+end
+
+return update()
+""" % (int(start.lat * 1e7), int(start.lng * 1e7)))
+        self.set_parameters({
+            "SCR_ENABLE": 1,
+            "TERRAIN_OFS_MAX": 30,
+        })
+        self.reboot_sitl()
+        self.wait_ready_to_arm()
+
+        def script_offset():
+            raw = self.assert_receive_named_value_float("TER_RAW", timeout=60).value
+            corrected = self.assert_receive_named_value_float("TER_COR").value
+            return raw, corrected - raw
+
+        raw, offset = script_offset()
+        if abs(offset) > 0.01:
+            raise NotAchievedException("Offset before arming (got=%f)" % offset)
+
+        self.arm_vehicle()
+        # TERRAIN_REPORT carries the corrected height (C++ default)
+        want = self.get_terrain_height_at(start) - raw
+        if want < 15:
+            raise NotAchievedException("Reference offset too small to test (got=%f)" % want)
+        tstart = self.get_sim_time()
+        while True:
+            if self.get_sim_time_cached() - tstart > 10:
+                raise NotAchievedException("Script offset want=%f got=%f" % (want, offset))
+            raw, offset = script_offset()
+            if abs(offset - want) < 0.01:
+                break
+        self.disarm_vehicle()
+
     def TerrainLoiter(self):
         '''Test terrain following in loiter'''
         self.context_push()
@@ -8232,7 +8289,20 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
         self.assert_parameter_value("COMPASS_OFS_X", old_compass_ofs_x, epsilon=30)
 
     def _MAV_CMD_EXTERNAL_WIND_ESTIMATE(self, command):
+        # the external wind estimate is only used by DCM, and WIND
+        # reports the active estimator's wind, so keep DCM active
+        # rather than racing EKF3 becoming active after the reboot.
+        # DCM's own wind estimator blends the (near-zero) airspeed
+        # into its wind on each GPS sample, even on the ground, so
+        # stop it using the airspeed sensor or the commanded wind
+        # decays before we see it:
+        self.set_parameters({
+            'AHRS_EKF_TYPE': 0,
+            'ARSPD_USE': 0,
+        })
         self.reboot_sitl()
+        self.wait_gps_fix_type_gte(3)
+        self.delay_sim_time(5, reason="let DCM settle after GPS lock")
 
         def cmp_with_variance(a, b, p):
             return abs(a - b) < p
@@ -10381,6 +10451,7 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
             self.WatchdogHome,
             self.Soaring,
             self.Terrain,
+            self.ScriptingTerrainCorrected,
             self.UniversalAutoLandScript,
             self.TerrainLoiter,
             self.KebniSensAItionExternalINS,
