@@ -290,10 +290,12 @@ class Board:
 
         # potentially set extra defines from an environment variable:
         if cfg.options.define is not None:
-            for (n, v) in [d.split("=") for d in cfg.options.define]:
-                cfg.msg("Defining: %s" % (n, ), v)
-                env.CFLAGS += ['-D%s=%s' % (n, v)]
-                env.CXXFLAGS += ['-D%s=%s' % (n, v)]
+            for d in cfg.options.define:
+                (n, sep, v) = d.partition("=")
+                # -DFOO defines FOO as 1, -DFOO= defines it as empty
+                cfg.msg("Defining: %s" % (n, ), (v or '(empty)') if sep else '1')
+                env.CFLAGS += ['-D%s' % d]
+                env.CXXFLAGS += ['-D%s' % d]
 
         env.CFLAGS += [
             '-ffunction-sections',
@@ -648,7 +650,7 @@ class Board:
         bld.ap_version_append_str('AP_BUILD_ROOT', bld.srcnode.abspath(), "/tmp")
 
         if bld.env.build_dates:
-            if bld.options.consistent_builds:
+            if bld.env.CONSISTENT_BUILDS:
                 raise ValueError("can't enable consistent builds and build dates")
 
             import time
@@ -1356,7 +1358,7 @@ class chibios(Board):
         if not cfg.options.bootloader and cfg.env.HAL_NUM_CAN_IFACES:
             if int(cfg.env.HAL_NUM_CAN_IFACES) >= 1:
                 env.DEFINES.update(CANARD_IFACE_ALL=(1<<int(cfg.env.HAL_NUM_CAN_IFACES))-1)
-        if cfg.options.Werror or cfg.env.CC_VERSION in gcc_whitelist:
+        if not cfg.options.disable_Werror and (cfg.options.Werror or cfg.env.CC_VERSION in gcc_whitelist):
             cfg.msg("Enabling -Werror", "yes")
             if '-Werror' not in env.CXXFLAGS:
                 env.CXXFLAGS += [ '-Werror' ]
